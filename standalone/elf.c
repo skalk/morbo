@@ -57,6 +57,30 @@ gen_elf_segment(uint8_t **code, uintptr_t target, void *src, size_t len,
   byte_out(code, 0xAA);         /* STOSB */
 }
 
+enum {
+  MBH_MAGIC            = 0x1BADB002,
+  MBH_FLAG_AOUT_KLUDGE = 1 << 16
+};
+
+struct mbh {
+  uint32_t magic;
+  uint32_t flags;
+  uint32_t checksum;
+
+  /* address fields */
+  uint32_t header_addr;
+  uint32_t load_addr;
+  uint32_t load_end_addr;
+  uint32_t bss_end_addr;
+  uint32_t entry_addr;
+
+  /* graphics fields */
+  uint32_t mode_type;
+  uint32_t width;
+  uint32_t height;
+  uint32_t depth;
+};
+
 int
 start_module(struct mbi *mbi, bool uncompress, uint64_t phys_max)
 {
@@ -77,11 +101,19 @@ start_module(struct mbi *mbi, bool uncompress, uint64_t phys_max)
   // switch it on unconditionally, we assume that m->string is always initialized
   mbi->flags |=  MBI_FLAG_CMDLINE;
 
-  // check elf header
-  struct eh *elf = (struct eh *) m->mod_start;
-  assert(memcmp(elf->e_ident, ELFMAG, SELFMAG) == 0, "ELF header incorrect");
-
   uint8_t *code = (uint8_t *)0x7C00;
+
+  // check for raw image instead of elf binary
+  struct mbh * mbh = (struct mbh *) m->mod_start;
+  if (mbh->magic == MBH_MAGIC && mbh->flags & MBH_FLAG_AOUT_KLUDGE) {
+    size_t mod_size = (m->mod_end - m->mod_start);
+    gen_elf_segment(&code, mbh->load_addr, (void*)m->mod_start, mod_size, 0);
+    gen_mov(&code, EAX, 0x2BADB002);
+    gen_mov(&code, EDX, mbh->entry_addr);
+  } else {
+    // check elf header
+    struct eh *elf = (struct eh *) m->mod_start;
+    assert(memcmp(elf->e_ident, ELFMAG, SELFMAG) == 0, "ELF header incorrect");
 
 #define LOADER(EH, PH) {                                                \
     struct EH *elfc = (struct EH *)elf;                                               \
@@ -100,15 +132,16 @@ start_module(struct mbi *mbi, bool uncompress, uint64_t phys_max)
     gen_mov(&code, EDX, elfc->e_entry);                                 \
   }
 
-  switch (elf->e_ident[EI_CLASS]) {
-  case ELFCLASS32:
-    LOADER(eh, ph);
-    break;
-  case ELFCLASS64:
-    LOADER(eh64, ph64);
-    break;
-  default:
-    assert(false, "Invalid ELF class");
+    switch (elf->e_ident[EI_CLASS]) {
+    case ELFCLASS32:
+      LOADER(eh, ph);
+      break;
+    case ELFCLASS64:
+      LOADER(eh64, ph64);
+      break;
+    default:
+      assert(false, "Invalid ELF class");
+    }
   }
 
   gen_jmp_edx(&code);
